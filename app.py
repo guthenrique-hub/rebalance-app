@@ -7,12 +7,12 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from services.brokerage import calculate_brokerage
 from services.email_template import generate_email
+from services.order_audit import AUDIT_DISCLAIMER, audit_and_adjust_orders
 from services.pricing import fetch_prices
 from services.rebalance import build_orders_table, calculate_rebalance
 from services.tax import FISCAL_NOTICE, calculate_tax_estimate
-from utils.excel_export import build_excel_export
+from utils.excel_export import build_excel_export, generate_ordem_cio_excel
 from utils.tombamento_export import build_tombamento_export
 from utils.validators import normalize_origin, normalize_target, validate_prices, validate_run_inputs
 
@@ -22,6 +22,7 @@ DEFAULT_PORTFOLIO_PATH = BASE_DIR / "default_portfolio.json"
 ORIGIN_TEMPLATE_PATH = BASE_DIR / "assets" / "modelo_carteira_origem.xlsx"
 TARGET_TEMPLATE_PATH = BASE_DIR / "assets" / "modelo_carteira_destino.xlsx"
 TOMBAMENTO_TEMPLATE_PATH = BASE_DIR / "assets" / "CR_Tombamento_Modelo.xlsx"
+ORDEM_CIO_TEMPLATE_PATH = BASE_DIR / "assets" / "ORDEM CIO.xlsx"
 SAVED_TARGET_PORTFOLIOS_PATH = BASE_DIR / "saved_target_portfolios.json"
 DISCLAIMER = (
     "Este sistema é uma ferramenta de apoio operacional. Os resultados devem ser conferidos antes da execução "
@@ -46,6 +47,27 @@ def client_file_suffix(nome_cliente: str, conta_cliente: str) -> str:
     cliente = sanitize_filename_part(nome_cliente, "cliente")
     conta = sanitize_filename_part(conta_cliente, "conta")
     return f"{cliente}_{conta}"
+
+
+def build_ordem_cio_view(orders: pd.DataFrame, conta_cliente: str) -> pd.DataFrame:
+    if orders.empty:
+        return pd.DataFrame(columns=["Estratégia", "Cliente", "Ativo", "C/V", "Preço", "Qtd. Total"])
+
+    view = orders.copy()
+    quantities = pd.to_numeric(view["QTDD"], errors="coerce").fillna(0).astype(int)
+    view = view[quantities > 0].copy()
+    quantities = pd.to_numeric(view["QTDD"], errors="coerce").fillna(0).astype(int)
+    side_map = {"COMPRA": "C", "VENDA": "V", "C": "C", "V": "V"}
+    return pd.DataFrame(
+        {
+            "Estratégia": "Simples",
+            "Cliente": str(conta_cliente).strip(),
+            "Ativo": view["ATIVO"].astype(str).str.strip(),
+            "C/V": view["LADO"].astype(str).str.strip().str.upper().map(side_map),
+            "Preço": "",
+            "Qtd. Total": quantities,
+        }
+    ).dropna(subset=["C/V"]).reset_index(drop=True)
 
 
 def load_default_portfolio() -> pd.DataFrame:
@@ -112,6 +134,15 @@ def prepare_target_for_editor(df: pd.DataFrame) -> pd.DataFrame:
 def show_errors(errors: list[str]) -> None:
     for error in errors:
         st.error(error)
+
+
+def audit_status_badge(status: str) -> None:
+    if status == "ERRO CRÍTICO":
+        st.error(f"Status geral da auditoria: {status}")
+    elif status == "ALERTA":
+        st.warning(f"Status geral da auditoria: {status}")
+    else:
+        st.success(f"Status geral da auditoria: {status}")
 
 
 def pie_chart(df: pd.DataFrame, names: str, values: str, title: str):
@@ -200,6 +231,14 @@ with st.sidebar:
             "Baixar modelo de Carteira Destino",
             data=TARGET_TEMPLATE_PATH.read_bytes(),
             file_name="modelo_carteira_destino.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    if ORDEM_CIO_TEMPLATE_PATH.exists():
+        st.download_button(
+            "Baixar Modelo de Ordem CIO",
+            data=ORDEM_CIO_TEMPLATE_PATH.read_bytes(),
+            file_name="ORDEM CIO.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -356,11 +395,22 @@ if st.session_state.get("run_requested"):
         aporte=aporte,
         retirada=retirada,
     )
+    audit_result = audit_and_adjust_orders(
+        detail=detail,
+        aporte=aporte,
+        retirada=retirada,
+        patrimonio_ajustado=rebalance_summary["patrimonio_ajustado"],
+    )
+    detail = audit_result["detail"]
+    audit_summary = audit_result["summary"]
+    audit_checks = audit_result["checks"]
+    audit_has_critical = bool(audit_result["has_critical"])
     orders = build_orders_table(detail, conta_cliente, sort_mode)
-    order_detail = detail[detail["quantidade_ordem"] > 0].copy()
-    costs = calculate_brokerage(order_detail)
+    costs = audit_result["costs"]
     fiscal_detail, fiscal_summary = calculate_tax_estimate(detail, vendas_ja_realizadas_mes)
     file_suffix = client_file_suffix(nome_cliente, conta_cliente)
+    ordem_cio_bytes = None
+    tombamento_bytes = None
 
     metric_cols = st.columns(5)
     metric_cols[0].metric("Patrimônio atual", format_brl(rebalance_summary["valor_total_carteira_atual"]))
@@ -374,7 +424,37 @@ if st.session_state.get("run_requested"):
     metric_cols[1].metric("Total vendas", format_brl(costs["total_vendas"]))
     metric_cols[2].metric("Movimentação total", format_brl(costs["movimentacao_total"]))
     metric_cols[3].metric("Custo total estimado", format_brl(costs["custo_total"]))
-    metric_cols[4].metric("Caixa estimado", format_brl(rebalance_summary["caixa_estimado"]))
+    metric_cols[4].metric("Caixa residual final", format_brl(float(audit_summary["caixa_final"])))
+
+    st.header("5. Auditoria das Ordens")
+    st.warning(AUDIT_DISCLAIMER)
+    audit_status_badge(str(audit_summary["status_geral"]))
+    audit_cols = st.columns(5)
+    audit_cols[0].metric("Caixa disponível para compras", format_brl(float(audit_summary["caixa_disponivel_para_compras"])))
+    audit_cols[1].metric("Total compras", format_brl(float(audit_summary["total_compras"])))
+    audit_cols[2].metric("Total vendas", format_brl(float(audit_summary["total_vendas"])))
+    audit_cols[3].metric("Aporte", format_brl(float(audit_summary["aporte"])))
+    audit_cols[4].metric("Retirada", format_brl(float(audit_summary["retirada"])))
+
+    audit_cols = st.columns(4)
+    audit_cols[0].metric("Custos estimados", format_brl(float(audit_summary["custo_total"])))
+    audit_cols[1].metric("Caixa residual final", format_brl(float(audit_summary["caixa_final"])))
+    audit_cols[2].metric("Erros críticos", int(audit_summary["erros_criticos"]))
+    audit_cols[3].metric("Alertas", int(audit_summary["alertas"]))
+
+    st.dataframe(
+        audit_checks,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "status": st.column_config.TextColumn("status"),
+            "valor_esperado": st.column_config.TextColumn("valor esperado"),
+            "valor_calculado": st.column_config.TextColumn("valor calculado"),
+            "diferença": st.column_config.TextColumn("diferença"),
+        },
+    )
+    if audit_has_critical:
+        st.error("Ordens bloqueadas pela auditoria. Corrija os pontos indicados antes de exportar.")
 
     st.subheader("Tabela Detalhada de Rebalanceamento")
     st.dataframe(
@@ -393,11 +473,36 @@ if st.session_state.get("run_requested"):
         },
     )
 
-    st.header("5. Ordens Geradas")
-    st.dataframe(orders, use_container_width=True, hide_index=True)
+    st.header("6. Ordens Geradas")
+    ordem_cio_view = build_ordem_cio_view(orders, conta_cliente)
+    st.dataframe(ordem_cio_view, use_container_width=True, hide_index=True)
     st.text_area("Tabela para copiar", orders.to_csv(index=False, sep="\t"), height=180)
+    download_order_col_1, download_order_col_2 = st.columns(2)
+    with download_order_col_1:
+        if ORDEM_CIO_TEMPLATE_PATH.exists():
+            st.download_button(
+                "Baixar Modelo de Ordem CIO",
+                data=ORDEM_CIO_TEMPLATE_PATH.read_bytes(),
+                file_name="ORDEM CIO.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Modelo de Ordem CIO não encontrado em assets/ORDEM CIO.xlsx.")
+    with download_order_col_2:
+        if audit_has_critical:
+            st.error("Download bloqueado pela auditoria.")
+        elif ORDEM_CIO_TEMPLATE_PATH.exists():
+            ordem_cio_bytes = generate_ordem_cio_excel(ORDEM_CIO_TEMPLATE_PATH, conta_cliente, orders)
+            st.download_button(
+                "Baixar Ordem CIO Preenchida",
+                data=ordem_cio_bytes,
+                file_name=f"ordem_cio_preenchida_{file_suffix}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
-    st.header("6. Custos Operacionais")
+    st.header("7. Custos Operacionais")
     costs_df = pd.DataFrame(
         [
             {"Item": "Total compras", "Valor": costs["total_compras"]},
@@ -410,7 +515,7 @@ if st.session_state.get("run_requested"):
     )
     st.dataframe(costs_df, use_container_width=True, hide_index=True)
 
-    st.header("7. Estimativa Fiscal")
+    st.header("8. Estimativa Fiscal")
     st.warning(FISCAL_NOTICE)
     fiscal_cols = st.columns(4)
     fiscal_cols[0].metric("Vendas já realizadas no mês", format_brl(float(fiscal_summary["vendas_ja_realizadas_mes"])))
@@ -441,7 +546,7 @@ if st.session_state.get("run_requested"):
     if "preco_medio" not in origin_clean.columns or origin_clean["preco_medio"].isna().any():
         st.info("Para estimar IR em todas as vendas, use o modelo de Carteira Origem com a coluna Preço Médio preenchida.")
 
-    st.header("8. Gráficos")
+    st.header("9. Gráficos")
     chart_col_1, chart_col_2 = st.columns(2)
     with chart_col_1:
         st.plotly_chart(pie_chart(detail, "ticker", "valor_atual", "Carteira atual"), use_container_width=True)
@@ -466,11 +571,16 @@ if st.session_state.get("run_requested"):
         use_container_width=True,
     )
 
-    st.header("9. E-mail para Cliente")
+    st.header("10. E-mail para Cliente")
     email_text = generate_email(nome_cliente, orders, costs, assessor)
     st.text_area("Texto do e-mail", email_text, height=420)
 
-    st.header("10. Download Excel")
+    st.header("11. Download Excel")
+    if ORDEM_CIO_TEMPLATE_PATH.exists() and ordem_cio_bytes is None:
+        ordem_cio_bytes = generate_ordem_cio_excel(ORDEM_CIO_TEMPLATE_PATH, conta_cliente, orders)
+    if TOMBAMENTO_TEMPLATE_PATH.exists() and tombamento_bytes is None:
+        tombamento_bytes = build_tombamento_export(TOMBAMENTO_TEMPLATE_PATH, detail, conta_cliente)
+
     excel_bytes = build_excel_export(
         orders=orders,
         detail=detail.drop(columns=["diferenca_peso_pos_vs_meta"], errors="ignore"),
@@ -481,19 +591,27 @@ if st.session_state.get("run_requested"):
         fiscal_detail=fiscal_detail,
         fiscal_summary=fiscal_summary,
         fiscal_notice=FISCAL_NOTICE,
+        ordem_cio_bytes=ordem_cio_bytes,
+        tombamento_bytes=tombamento_bytes,
+        audit_summary=audit_summary,
+        audit_checks=audit_checks,
     )
     download_col_1, download_col_2 = st.columns(2)
     with download_col_1:
-        st.download_button(
-            "Baixar ordens_rebalanceamento.xlsx",
-            data=excel_bytes,
-            file_name=f"ordens_rebalanceamento_{file_suffix}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        if audit_has_critical:
+            st.error("Download bloqueado pela auditoria.")
+        else:
+            st.download_button(
+                "Baixar ordens_rebalanceamento.xlsx",
+                data=excel_bytes,
+                file_name=f"ordens_rebalanceamento_{file_suffix}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
     with download_col_2:
-        if TOMBAMENTO_TEMPLATE_PATH.exists():
-            tombamento_bytes = build_tombamento_export(TOMBAMENTO_TEMPLATE_PATH, detail, conta_cliente)
+        if audit_has_critical:
+            st.error("Download bloqueado pela auditoria.")
+        elif TOMBAMENTO_TEMPLATE_PATH.exists():
             st.download_button(
                 "Baixar Tombamento Pós-Rebalanceamento Preenchido",
                 data=tombamento_bytes,
