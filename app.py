@@ -36,6 +36,18 @@ def format_brl(value: float) -> str:
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def sanitize_filename_part(value: str, fallback: str) -> str:
+    cleaned = "".join(char if char.isalnum() else "_" for char in str(value).strip())
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    return cleaned or fallback
+
+
+def client_file_suffix(nome_cliente: str, conta_cliente: str) -> str:
+    cliente = sanitize_filename_part(nome_cliente, "cliente")
+    conta = sanitize_filename_part(conta_cliente, "conta")
+    return f"{cliente}_{conta}"
+
+
 def load_default_portfolio() -> pd.DataFrame:
     with DEFAULT_PORTFOLIO_PATH.open("r", encoding="utf-8") as file:
         return pd.DataFrame(json.load(file))
@@ -348,17 +360,7 @@ if st.session_state.get("run_requested"):
     order_detail = detail[detail["quantidade_ordem"] > 0].copy()
     costs = calculate_brokerage(order_detail)
     fiscal_detail, fiscal_summary = calculate_tax_estimate(detail, vendas_ja_realizadas_mes)
-
-    with tombamento_container:
-        if TOMBAMENTO_TEMPLATE_PATH.exists():
-            tombamento_bytes = build_tombamento_export(TOMBAMENTO_TEMPLATE_PATH, detail, conta_cliente)
-            st.download_button(
-                "Baixar Tombamento Pós-Rebalanceamento Preenchido",
-                data=tombamento_bytes,
-                file_name="tombamento_pos_rebalanceamento.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+    file_suffix = client_file_suffix(nome_cliente, conta_cliente)
 
     metric_cols = st.columns(5)
     metric_cols[0].metric("Patrimônio atual", format_brl(rebalance_summary["valor_total_carteira_atual"]))
@@ -480,12 +482,26 @@ if st.session_state.get("run_requested"):
         fiscal_summary=fiscal_summary,
         fiscal_notice=FISCAL_NOTICE,
     )
-    st.download_button(
-        "Baixar ordens_rebalanceamento.xlsx",
-        data=excel_bytes,
-        file_name="ordens_rebalanceamento.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    download_col_1, download_col_2 = st.columns(2)
+    with download_col_1:
+        st.download_button(
+            "Baixar ordens_rebalanceamento.xlsx",
+            data=excel_bytes,
+            file_name=f"ordens_rebalanceamento_{file_suffix}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with download_col_2:
+        if TOMBAMENTO_TEMPLATE_PATH.exists():
+            tombamento_bytes = build_tombamento_export(TOMBAMENTO_TEMPLATE_PATH, detail, conta_cliente)
+            st.download_button(
+                "Baixar Tombamento Pós-Rebalanceamento Preenchido",
+                data=tombamento_bytes,
+                file_name=f"tombamento_pos_rebalanceamento_{file_suffix}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.warning("Modelo de tombamento não encontrado em assets/CR_Tombamento_Modelo.xlsx.")
 else:
     st.info("Preencha os dados, revise as tabelas editáveis e clique em Rodar rebalanceamento.")
