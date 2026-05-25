@@ -1,0 +1,52 @@
+{
+  "TOP DIVIDENDOS": [
+    {
+      "ticker": "ALOS3",
+      "peso": 0.075
+    },
+    {
+      "ticker": "AXIA7",
+      "peso": 0.05
+    },
+    {
+      "ticker": "B3SA3",
+      "peso": 0.1
+    },
+    {
+      "ticker": "CPLE3",
+      "peso": 0.15
+    },
+    {
+      "ticker": "CXSE3",
+      "peso": 0.05
+    },
+    {
+      "ticker": "ENGI11",
+      "peso": 0.05
+    },
+    {
+      "ticker": "ITUB4",
+      "peso": 0.15
+    },
+    {
+      "ticker": "PETR4",
+      "peso": 0.1
+    },
+    {
+      "ticker": "PRIO3",
+      "peso": 0.05
+    },
+    {
+      "ticker": "SANB11",
+      "peso": 0.05
+    },
+    {
+      "ticker": "VALE3",
+      "peso": 0.125
+    },
+    {
+      "ticker": "VIVT3",
+      "peso": 0.05
+    }
+  ]
+}
