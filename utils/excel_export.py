@@ -9,6 +9,15 @@ import pandas as pd
 from openpyxl import load_workbook
 
 
+def _column_width(df: pd.DataFrame, column_position: int, header: object, minimum: int = 12, maximum: int = 35) -> int:
+    values = [len(str(header))]
+    if df is not None and not df.empty and column_position < len(df.columns):
+        series = df.iloc[:, column_position]
+        for item in series.head(200).tolist():
+            values.append(0 if pd.isna(item) else len(str(item)))
+    return max(minimum, min(maximum, max(values) + 2))
+
+
 def build_excel_export(
     orders: pd.DataFrame,
     detail: pd.DataFrame,
@@ -59,7 +68,7 @@ def build_excel_export(
             worksheet = writer.sheets[safe_name]
             for col_num, value in enumerate(df.columns):
                 worksheet.write(0, col_num, value, header_format)
-                width = max(12, min(35, max(len(str(value)), *(len(str(x)) for x in df[value].head(200).fillna(""))) + 2))
+                width = _column_width(df, col_num, value)
                 worksheet.set_column(col_num, col_num, width)
 
             for col_num, value in enumerate(df.columns):
@@ -77,7 +86,7 @@ def build_excel_export(
 
             for col_num, value in enumerate(fiscal_detail.columns):
                 worksheet.write(1, col_num, value, header_format)
-                width = max(12, min(35, max(len(str(value)), *(len(str(x)) for x in fiscal_detail[value].head(200).fillna(""))) + 2))
+                width = _column_width(fiscal_detail, col_num, value)
                 worksheet.set_column(col_num, col_num, width)
                 lowered = str(value).lower()
                 if (
@@ -126,7 +135,7 @@ def build_excel_export(
             audit_checks.to_excel(writer, index=False, sheet_name=sheet_name, startrow=checks_start_row + 1)
             for col_num, value in enumerate(audit_checks.columns):
                 worksheet.write(checks_start_row + 1, col_num, value, header_format)
-                width = max(14, min(45, max(len(str(value)), *(len(str(x)) for x in audit_checks[value].head(200).fillna(""))) + 2))
+                width = _column_width(audit_checks, col_num, value, minimum=14, maximum=45)
                 worksheet.set_column(col_num, col_num, width)
 
     excel_bytes = output.getvalue()
