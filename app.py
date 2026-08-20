@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -102,16 +103,42 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame | None:
         return None
     suffix = Path(uploaded_file.name).suffix.lower()
     try:
+        uploaded_file.seek(0)
         if suffix == ".csv":
-            return pd.read_csv(uploaded_file)
-        if suffix in {".xlsx", ".xls"}:
-            return pd.read_excel(uploaded_file)
+            data = pd.read_csv(uploaded_file)
+        elif suffix in {".xlsx", ".xls"}:
+            data = pd.read_excel(uploaded_file)
+        else:
+            st.error("Formato não suportado. Envie arquivo CSV, XLS ou XLSX.")
+            return None
+        uploaded_file.seek(0)
+        return data
     except Exception as exc:
         st.error(f"Não foi possível ler o arquivo {uploaded_file.name}: {exc}")
         return None
 
-    st.error("Formato não suportado. Envie arquivo CSV, XLS ou XLSX.")
-    return None
+
+def uploaded_file_digest(uploaded_file) -> str:
+    if uploaded_file is None:
+        return "none"
+    try:
+        content = uploaded_file.getvalue()
+    except AttributeError:
+        uploaded_file.seek(0)
+        content = uploaded_file.read()
+        uploaded_file.seek(0)
+    return hashlib.sha256(content).hexdigest()[:12]
+
+
+def reset_target_editor_when_source_changes(source_key: str) -> None:
+    previous_key = st.session_state.get("_target_source_key")
+    if previous_key == source_key:
+        return
+
+    for key in list(st.session_state):
+        if str(key).startswith("target_editor_"):
+            del st.session_state[key]
+    st.session_state["_target_source_key"] = source_key
 
 
 def default_origin() -> pd.DataFrame:
@@ -245,7 +272,12 @@ with st.sidebar:
     origem_upload = st.file_uploader("Upload carteira origem", type=["csv", "xlsx", "xls"])
     destino_upload = st.file_uploader("Upload carteira destino", type=["csv", "xlsx", "xls"])
     saved_target_options = ["Carteira padrão"] + sorted(saved_target_portfolios)
-    selected_saved_target = st.selectbox("Carteira destino salva", saved_target_options)
+    selected_saved_target = st.selectbox(
+        "Carteira destino salva",
+        saved_target_options,
+        disabled=destino_upload is not None,
+        help="Ignorada enquanto houver arquivo em Upload carteira destino.",
+    )
     sort_mode = st.selectbox("Ordenação das ordens", ["Compras depois vendas", "Vendas depois compras"])
     run_rebalance = st.button("Rodar rebalanceamento", type="primary", use_container_width=True)
 
@@ -267,16 +299,23 @@ origin_source = read_uploaded_file(origem_upload)
 if origin_source is None:
     origin_source = default_origin()
 
-target_source = read_uploaded_file(destino_upload)
-if target_source is not None:
+target_source = None
+if destino_upload is not None:
+    target_source = read_uploaded_file(destino_upload)
+    target_source_key = f"upload_{uploaded_file_digest(destino_upload)}"
+if destino_upload is not None and target_source is not None:
     st.info("Carteira destino carregada pelo upload. Ela pode ser salva com um nome na seção Carteira Destino.")
-    target_source_key = f"upload_{destino_upload.name}"
+elif destino_upload is not None:
+    target_source = pd.DataFrame(columns=["ticker", "peso"])
+    st.error("A carteira destino anexada não foi carregada. Remova o arquivo ou envie uma planilha válida.")
 elif selected_saved_target != "Carteira padrão":
     target_source = target_portfolio_from_saved(selected_saved_target, saved_target_portfolios)
     target_source_key = f"saved_{selected_saved_target}"
 else:
     target_source = load_default_portfolio()
     target_source_key = "default"
+
+reset_target_editor_when_source_changes(target_source_key)
 
 st.header("1. Carteira Origem")
 st.write("Formato simples: `ticker | quantidade`. O modelo disponível usa `Ativo` na coluna A, `Qtd. Total` na H e `Posição` na L.")
